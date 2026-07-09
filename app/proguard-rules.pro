@@ -1,0 +1,2 @@
+-keep class com.gonets.** { *; }
+-dontwarn com.google.zxing.**

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline Mesh - Demo UI</title>
+<style>
+* { box-sizing:border-box; font-family: system-ui, sans-serif; }
+body { margin:0; background:#0f0f0f; color:#fff; display:flex; flex-direction:column; height:100vh; }
+header { background:#1a1a1a; padding:14px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; }
+header .title { font-weight:700; }
+header .id { font-size:11px; color:#888; }
+.actions { display:flex; gap:8px; }
+.btn { background:#2a2a2a; border:1px solid #333; color:#fff; padding:8px 12px; border-radius:10px; cursor:pointer; font-size:13px; }
+.btn.primary { background:#0a84ff; border:none; }
+.contacts { background:#1c1c1e; margin:8px; border-radius:16px; padding:12px; border:1px solid #2a2a2a; max-height:35vh; overflow:auto; }
+.contact { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #2a2a2a; }
+.contact:last-child { border:none; }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
+.dot.on { background:#30d158; } .dot.off { background:#555; }
+.chat { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+.msg { max-width:78%; padding:10px 12px; border-radius:18px; font-size:14px; line-height:1.3; }
+.msg.me { align-self:flex-end; background:#0a84ff; border-bottom-right-radius:6px; }
+.msg.other { align-self:flex-start; background:#2c2c2e; border-bottom-left-radius:6px; }
+.inputbar { display:flex; gap:8px; padding:10px; background:#1a1a1a; border-top:1px solid #333; }
+.inputbar input { flex:1; background:#2c2c2e; border:1px solid #3a3a3c; color:#fff; border-radius:12px; padding:12px; }
+.qrbox { background:#fff; padding:12px; border-radius:12px; display:inline-block; }
+.modal { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:10; }
+.modal.open { display:flex; }
+.modal .card { background:#1c1c1e; border-radius:20px; padding:20px; width:90%; max-width:400px; border:1px solid #333; }
+small { color:#888; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="title">Mesh: <span id="myName">User_482</span></div>
+    <div class="id">ID: <span id="myId">a7f3c9d1</span> • постоянный ник • 2 online</div>
+  </div>
+  <div class="actions">
+    <button class="btn" onclick="openQr()">QR</button>
+    <button class="btn" onclick="openScan()">Scan</button>
+    <button class="btn" onclick="toggleContacts()">👥</button>
+  </div>
+</header>
+
+<div class="contacts" id="contacts">
+  <div style="font-size:12px; font-weight:700; color:#0a84ff; margin-bottom:6px;">КОНТАКТЫ РЯДОМ (Bluetooth + WiFi):</div>
+  <div class="contact">
+    <div><span class="dot on"></span><b>Андрей</b><br><small>ID: b4e2a1 • подключен • hop 1</small></div>
+    <button class="btn">✓</button>
+  </div>
+  <div class="contact">
+    <div><span class="dot off"></span><b>Маша</b><br><small>ID: 9c3f1a • найден • 3м • BT</small></div>
+    <button class="btn primary" onclick="requestConnect('Маша')">Подкл.</button>
+  </div>
+  <div class="contact">
+    <div><span class="dot off"></span><b>Леша с гор</b><br><small>ID: f1a2c9 • найден • WiFi Direct</small></div>
+    <button class="btn primary" onclick="requestConnect('Леша с гор')">Подкл.</button>
+  </div>
+  <div style="margin-top:8px; color:#ff453a; font-size:11px;">Входящий запрос: <b>Маша хочет подключиться</b>. Подтвердите с обеих сторон.</div>
+</div>
+
+<div class="chat" id="chat">
+  <div class="msg other">Привет! Это mesh, без интернета, через Bluetooth 📡<div style="font-size:10px; opacity:0.6; margin-top:4px;">Маша • 19:32 • ttl=7</div></div>
+  <div class="msg me">Работает! Вижу твой ID постоянный<div style="font-size:10px; opacity:0.6; margin-top:4px;">Ты • 19:33</div></div>
+  <div class="msg other">📷 IMG_2024.jpg ✅ 2.3MB
+    <div style="font-size:11px; margin-top:4px; opacity:0.7;">Фото через WiFi, 15 Мбит/с</div>
+    <div style="font-size:10px; opacity:0.6; margin-top:4px;">Маша • 19:33</div>
+  </div>
+  <div class="msg me">🎤 голосовое 3с ▶
+    <div style="font-size:10px; opacity:0.6; margin-top:4px;">Ты • 19:34 • через mesh</div>
+  </div>
+  <div class="msg other">Это сообщение прошло через Андрея (hop 2) — mesh работает! ttl было 7 стало 6
+    <div style="font-size:10px; opacity:0.6; margin-top:4px;">Леша с гор • 19:34 • ttl=6</div>
+  </div>
+</div>
+
+<div class="inputbar">
+  <button class="btn" onclick="alert('Выбор файла — в реальном APK откроется файловый менеджер')">📎</button>
+  <button class="btn" onclick="alert('Выбор фото')">🖼️</button>
+  <button class="btn" onclick="alert('Запись голосового: нажал — запись, еще раз — отправка')">🎤</button>
+  <input id="msgInput" placeholder="Сообщение в mesh...">
+  <button class="btn primary" onclick="send()">➤</button>
+</div>
+
+<!-- QR Modal -->
+<div class="modal" id="qrModal" onclick="if(event.target==this)closeQr()">
+  <div class="card" style="text-align:center;">
+    <h3 style="margin:0 0 8px 0;">Мой QR для подключения</h3>
+    <small>Покажи другому телефону. Он отсканирует и подключится по Bluetooth/WiFi без интернета.</small>
+    <div style="margin:16px 0;">
+      <div class="qrbox"><svg id="qrSvg" width="200" height="200"></svg></div>
+      <div style="margin-top:10px; font-size:12px;"><b id="qrName">User_482</b><br><span id="qrId">a7f3c9d1</span><br><small>OFFLINE_MESH|a7f3c9d1|User_482</small></div>
+    </div>
+    <button class="btn primary" onclick="closeQr()" style="width:100%;">Закрыть</button>
+  </div>
+</div>
+
+<!-- Connect confirm Modal -->
+<div class="modal" id="confirmModal">
+  <div class="card">
+    <h3>Запрос на подключение</h3>
+    <p><b id="reqName">Маша</b> (ID: <span id="reqId">9c3f1a</span>) хочет подключиться к вам по Bluetooth/WiFi.</p>
+    <small>Подтвердите с обеих сторон, чтобы установить связь. После подключения сможете обмениваться сообщениями, файлами, фото и голосовыми без интернета.</small>
+    <div style="display:flex; gap:10px; margin-top:16px;">
+      <button class="btn" style="flex:1;" onclick="closeConfirm(false)">Отклонить</button>
+      <button class="btn primary" style="flex:1;" onclick="closeConfirm(true)">Принять</button>
+    </div>
+  </div>
+</div>
+
+<!-- Scan Modal -->
+<div class="modal" id="scanModal" onclick="if(event.target==this)closeScan()">
+  <div class="card">
+    <h3>Сканирование QR</h3>
+    <small>В реальном APK откроется камера. Введи ID для теста:</small>
+    <input id="scanInput" placeholder="OFFLINE_MESH|deviceId|name" style="width:100%; margin-top:12px; padding:12px; border-radius:10px; border:1px solid #333; background:#2c2c2e; color:#fff;">
+    <div style="display:flex; gap:10px; margin-top:12px;">
+      <button class="btn" style="flex:1;" onclick="closeScan()">Отмена</button>
+      <button class="btn primary" style="flex:1;" onclick="doScan()">Подключиться</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Demo logic - only UI
+function openQr(){ document.getElementById('qrModal').classList.add('open'); drawQr(); }
+function closeQr(){ document.getElementById('qrModal').classList.remove('open'); }
+function toggleContacts(){ const c=document.getElementById('contacts'); c.style.display=c.style.display=='none'?'block':'block'; }
+function openScan(){ document.getElementById('scanModal').classList.add('open'); }
+function closeScan(){ document.getElementById('scanModal').classList.remove('open'); }
+function doScan(){
+  const v=document.getElementById('scanInput').value;
+  if(v.startsWith('OFFLINE_MESH|')){ alert('Найдено устройство! Запрашиваю подключение... Подтвердите на втором телефоне.'); closeScan(); }
+  else alert('Неверный формат QR. Должен быть OFFLINE_MESH|id|name');
+}
+function requestConnect(name){
+  document.getElementById('reqName').innerText=name;
+  document.getElementById('confirmModal').classList.add('open');
+}
+function closeConfirm(ok){
+  document.getElementById('confirmModal').classList.remove('open');
+  if(ok){ alert('Подключено! Теперь можно писать.'); } else { alert('Отклонено'); }
+}
+function send(){
+  const inp=document.getElementById('msgInput'); const txt=inp.value.trim(); if(!txt)return;
+  const chat=document.getElementById('chat'); const div=document.createElement('div'); div.className='msg me'; div.innerHTML=txt+'<div style="font-size:10px; opacity:0.6; margin-top:4px;">Ты • сейчас</div>'; chat.appendChild(div); inp.value=''; chat.scrollTop=chat.scrollHeight;
+}
+function drawQr(){
+  // Simple fake QR pattern for demo
+  const svg=document.getElementById('qrSvg'); svg.innerHTML='';
+  const size=200; const cells=20; const cellSize=size/cells;
+  for(let y=0;y<cells;y++){ for(let x=0;x<cells;x++){ if(Math.random()>0.5){ const rect=document.createElementNS('http://www.w3.org/2000/svg','rect'); rect.setAttribute('x', x*cellSize); rect.setAttribute('y', y*cellSize); rect.setAttribute('width', cellSize); rect.setAttribute('height', cellSize); rect.setAttribute('fill','black'); svg.appendChild(rect); } } }
+  // corners
+  [[0,0],[0,15],[15,0]].forEach(([cx,cy])=>{ for(let y=0;y<5;y++) for(let x=0;x<5;x++){ if(x==0||x==4||y==0||y==4||(x>=1&&x<=3&&y>=1&&y<=3&&!(x==1&&y==1||x==3&&y==1||x==1&&y==3||x==3&&y==3))){ const r=document.createElementNS('http://www.w3.org/2000/svg','rect'); r.setAttribute('x',(cx+x)*cellSize); r.setAttribute('y',(cy+y)*cellSize); r.setAttribute('width',cellSize); r.setAttribute('height',cellSize); r.setAttribute('fill','black'); svg.appendChild(r);} } });
+}
+document.getElementById('msgInput').addEventListener('keydown', e=>{ if(e.key==='Enter') send(); });
+// auto show confirm demo after 2 sec
+setTimeout(()=>{ document.getElementById('confirmModal').classList.add('open'); }, 1500);
+</script>
+</body>
+</html>

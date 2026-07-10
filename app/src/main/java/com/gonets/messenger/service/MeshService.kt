@@ -28,7 +28,8 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
     private val connected = ConcurrentHashMap<String, Peer>()
     private val seenIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val pendingPackets = Collections.synchronizedList(mutableListOf<MeshPacket>())
-    private val filePayloadToPacket = ConcurrentHashMap<Long, MeshPacket>()
+    private val pendingFileMeta = ConcurrentHashMap<Long, MeshPacket>()
+    private val pendingFiles = ConcurrentHashMap<Long, File>()
     private val pendingQrTarget = MutableStateFlow<String?>(null)
 
     fun start() {
@@ -47,12 +48,14 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
         }
     }
     fun stop() { try { client.stopAllEndpoints(); client.stopAdvertising(); client.stopDiscovery() } catch (_: Exception) {}; scope.cancel() }
+
     private fun markSeen(id: String): Boolean {
         if (seenIds.contains(id)) return false
         seenIds.add(id)
         if (seenIds.size > 2000) seenIds.remove(seenIds.first())
         return true
     }
+
     private fun startAdvertising() {
         val opts = AdvertisingOptions.Builder().setStrategy(STRATEGY).build()
         client.startAdvertising("$myDeviceId|$myName", SERVICE_ID, lifecycleCallback, opts)
@@ -65,6 +68,7 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
             .addOnSuccessListener { log("✓ Ищу контакты рядом") }
             .addOnFailureListener { log("✗ Ошибка поиска: ${it.message}") }
     }
+
     private val discoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
             val parts = info.endpointName.split("|", limit = 2)
@@ -82,6 +86,7 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
             peersFlow.value[endpointId]?.let { if (!it.isConnected) peersFlow.value = peersFlow.value - endpointId }
         }
     }
+
     private val lifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
             val parts = info.endpointName.split("|", limit = 2)
@@ -109,6 +114,7 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
             peersFlow.value[endpointId]?.let { peersFlow.value = peersFlow.value + (endpointId to it.copy(isConnected = false)) }
         }
     }
+
     fun acceptConnectionRequest(endpointId: String) { client.acceptConnection(endpointId, payloadCallback) }
     fun rejectConnectionRequest(endpointId: String) { client.rejectConnection(endpointId); incomingRequestsFlow.value = incomingRequestsFlow.value - endpointId }
     fun requestConnectionTo(endpointId: String) {
@@ -124,17 +130,21 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             when (payload.type) {
                 Payload.Type.BYTES -> {
-                    try { handleIncoming(MeshPacket.fromJson(String(payload.asBytes()!!)), endpointId) } catch (e: Exception) {}
+                    try {
+                        val packet = MeshPacket.fromJson(String(payload.asBytes()!!))
+                        handleIncoming(packet, endpointId)
+                    } catch (e: Exception) { Log.e("Mesh", "parse fail", e) }
                 }
                 Payload.Type.FILE -> {
                     val file = payload.asFile()!!.asJavaFile()!!
-                    val meta = filePayloadToPacket[payload.id]
+                    val fileId = payload.id
+                    val meta = pendingFileMeta.remove(fileId)
                     if (meta != null) {
-                        val dest = File(context.filesDir, "mesh_files/${meta.fileName}").also { it.parentFile?.mkdirs() }
-                        try { file.renameTo(dest) } catch (_: Exception) { file.copyTo(dest, true) }
-                        filePayloadToPacket.remove(payload.id)
-                        messagesFlow.value = messagesFlow.value + meta
-                        saveHistory()
+                        completeFileReception(file, meta, endpointId)
+                    } else {
+                        // файл пришел раньше метаданных
+                        pendingFiles[fileId] = file
+                        log("Файл $fileId получен, жду метаданные...")
                     }
                 }
                 else -> {}
@@ -142,42 +152,125 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
         }
         override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
     }
+
     private fun handleIncoming(packet: MeshPacket, fromEndpoint: String) {
-        if (!markSeen(packet.id)) return
-        val isForMe = packet.destId == null || packet.destId == myDeviceId
-        if (isForMe) { messagesFlow.value = messagesFlow.value + packet; saveHistory() }
-        if (shouldForward(packet) && packet.type == MessageType.TEXT.name) forwardPacket(packet.copy(ttl = packet.ttl - 1), fromEndpoint)
+        if (!markSeen(packet.id)) {
+            Log.d("Mesh", "Duplicate ${packet.id}")
+            return
+        }
+
+        if (packet.type == MessageType.TEXT.name) {
+            val isForMe = packet.destId == null || packet.destId == myDeviceId
+            if (isForMe) {
+                messagesFlow.value = messagesFlow.value + packet
+                saveHistory()
+            }
+            if (shouldForward(packet)) {
+                forwardTextPacket(packet.copy(ttl = packet.ttl - 1), fromEndpoint)
+            }
+        } else {
+            // Файл / Фото / Голосовое - ждем файл
+            val fileId = packet.filePayloadId
+            if (fileId != null) {
+                val existingFile = pendingFiles.remove(fileId)
+                if (existingFile != null) {
+                    completeFileReception(existingFile, packet, fromEndpoint)
+                } else {
+                    pendingFileMeta[fileId] = packet
+                    log("Метаданные файла ${packet.fileName} получены, жду файл...")
+                    // Показываем в чате как загружается
+                    messagesFlow.value = messagesFlow.value + packet
+                    saveHistory()
+                }
+            }
+        }
     }
+
+    private fun completeFileReception(tempFile: File, meta: MeshPacket, fromEndpoint: String) {
+        try {
+            val dest = File(context.filesDir, "mesh_files/${meta.fileName}").also { it.parentFile?.mkdirs() }
+            try { tempFile.renameTo(dest) } catch (_: Exception) { tempFile.copyTo(dest, true) }
+
+            // Если сообщение уже было добавлено как "загружается", обновляем список чтобы триггернуть recompose
+            val exists = messagesFlow.value.any { it.id == meta.id }
+            if (!exists) {
+                messagesFlow.value = messagesFlow.value + meta
+            } else {
+                // Пересоздаем список чтобы UI перерисовался и увидел что файл теперь существует
+                messagesFlow.value = messagesFlow.value.toList()
+            }
+            saveHistory()
+            log("✓ Файл получен: ${meta.fileName} ${(meta.fileSize ?: 0) / 1024}КБ")
+
+            // Mesh forwarding для файлов
+            if (shouldForward(meta) && meta.ttl > 1) {
+                forwardFile(dest, meta.copy(ttl = meta.ttl - 1), fromEndpoint)
+            }
+        } catch (e: Exception) {
+            Log.e("Mesh", "complete file fail", e)
+        }
+    }
+
     private fun shouldForward(p: MeshPacket): Boolean {
         if (p.ttl <= 0) return false
         if (p.originId == myDeviceId) return false
         if (p.destId != null && p.destId == myDeviceId) return false
         return true
     }
-    private fun forwardPacket(packet: MeshPacket, exclude: String? = null) {
+
+    private fun forwardTextPacket(packet: MeshPacket, exclude: String?) {
         if (connected.isEmpty()) { pendingPackets.add(packet); return }
         val payload = Payload.fromBytes(packet.toJson().toByteArray())
         connected.keys.forEach { if (it != exclude) client.sendPayload(it, payload) }
+        log("Переслал текст ttl=${packet.ttl}")
     }
+
+    private fun forwardFile(file: File, packet: MeshPacket, exclude: String?) {
+        if (connected.size <= 1) return // некуда форвардить кроме отправителя
+        try {
+            val newFilePayload = Payload.fromFile(file)
+            val newPacket = packet.copy(filePayloadId = newFilePayload.id, ttl = packet.ttl)
+            val metaPayload = Payload.fromBytes(newPacket.toJson().toByteArray())
+            connected.keys.forEach { epId ->
+                if (epId != exclude) {
+                    client.sendPayload(epId, newFilePayload)
+                    client.sendPayload(epId, metaPayload)
+                }
+            }
+            log("Переслал файл ${packet.fileName} ttl=${newPacket.ttl}")
+        } catch (e: Exception) { Log.e("Mesh", "forward file fail", e) }
+    }
+
     fun sendText(text: String) {
         val packet = MeshPacket(UUID.randomUUID().toString(), myDeviceId, myName, null, 7, MessageType.TEXT.name, text, System.currentTimeMillis())
         markSeen(packet.id); messagesFlow.value = messagesFlow.value + packet; saveHistory()
         val payload = Payload.fromBytes(packet.toJson().toByteArray())
         if (connected.isEmpty()) pendingPackets.add(packet) else connected.keys.forEach { client.sendPayload(it, payload) }
     }
+
     fun sendFile(file: File, mime: String, type: MessageType, durationMs: Long? = null) {
-        val id = UUID.randomUUID().toString()
-        val filePayload = Payload.fromFile(file)
-        val packet = MeshPacket(id, myDeviceId, myName, null, 7, type.name, null, System.currentTimeMillis(), file.name, file.length(), mime, filePayload.id, durationMs)
-        markSeen(id); filePayloadToPacket[filePayload.id] = packet
-        val saved = File(context.filesDir, "mesh_files/${file.name}").also { it.parentFile?.mkdirs() }
-        file.copyTo(saved, overwrite = true)
-        messagesFlow.value = messagesFlow.value + packet; saveHistory()
-        val meta = Payload.fromBytes(packet.toJson().toByteArray())
-        if (connected.isEmpty()) pendingPackets.add(packet) else connected.keys.forEach {
-            client.sendPayload(it, filePayload); client.sendPayload(it, meta)
-        }
+        try {
+            val id = UUID.randomUUID().toString()
+            val filePayload = Payload.fromFile(file)
+            val packet = MeshPacket(id, myDeviceId, myName, null, 7, type.name, null, System.currentTimeMillis(), file.name, file.length(), mime, filePayload.id, durationMs)
+            markSeen(id)
+            val saved = File(context.filesDir, "mesh_files/${file.name}").also { it.parentFile?.mkdirs() }
+            file.copyTo(saved, overwrite = true)
+            messagesFlow.value = messagesFlow.value + packet; saveHistory()
+            val meta = Payload.fromBytes(packet.toJson().toByteArray())
+            if (connected.isEmpty()) {
+                pendingPackets.add(packet)
+                log("Нет подключений, файл в очереди")
+            } else {
+                connected.keys.forEach {
+                    client.sendPayload(it, filePayload)
+                    client.sendPayload(it, meta)
+                }
+                log("Отправляю файл ${file.name}")
+            }
+        } catch (e: Exception) { Log.e("Mesh", "sendFile fail", e) }
     }
+
     private fun saveHistory() {
         try {
             val sp = context.getSharedPreferences("gonets_history", 0)
@@ -199,7 +292,7 @@ class MeshService(private val context: Context, val myDeviceId: String, val myNa
     private fun resendPending() {
         if (pendingPackets.isEmpty() || connected.isEmpty()) return
         val toSend = pendingPackets.toList(); pendingPackets.clear()
-        toSend.forEach { if (it.ttl > 0) forwardPacket(it) }
+        toSend.forEach { if (it.ttl > 0) forwardTextPacket(it, null) }
     }
     private fun log(s: String) {
         logsFlow.value = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())} $s\n${logsFlow.value}"
